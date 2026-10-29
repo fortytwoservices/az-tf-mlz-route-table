@@ -1,0 +1,89 @@
+name: check
+
+# check and pr-title are the two required checks on main. One workflow, so that a pull request whose run
+# must be approved (a release pull request opened with GITHUB_TOKEN) needs one approval, not two. Editing
+# the title or description reruns both jobs: skipping check on an edit would report it as passed.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      # The title becomes the squash commit, from which release-please computes the version.
+      - name: Conventional Commit title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|docs|test|ci|chore|refactor|perf|build|style|revert)(\([a-z0-9._/-]+\))?!?: [^ ].*$'
+          if [[ ! $TITLE =~ $pattern ]]; then
+            echo "::error::The title becomes the squash commit and sets the version; use Conventional Commits, e.g. 'feat: add zones' or 'fix!: rename output'. Got: $TITLE"
+            exit 1
+          fi
+
+  check:
+    runs-on: ubuntu-latest
+    env:
+      TF_PLUGIN_CACHE_DIR: /home/runner/.terraform.d/plugin-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Otherwise the checkout's token header wins over the reader token below, and cloning a module
+          # fails with "Repository not found".
+          persist-credentials: false
+
+      # The az-tf-mlz-* modules are internal, and this repository's token reads only this repository.
+      - id: reader
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.AZ_TF_MODULE_READER_CLIENT_ID }}
+          private-key: ${{ secrets.AZ_TF_MODULE_READER_PRIVATE_KEY }}
+          owner: fortytwoservices
+          permission-contents: read
+
+      - name: Read the az-tf-mlz-* modules with the reader token
+        env:
+          TOKEN: ${{ steps.reader.outputs.token }}
+        run: |
+          git config --global \
+            url."https://x-access-token:${TOKEN}@github.com/fortytwoservices/az-tf-mlz-".insteadOf \
+            "https://github.com/fortytwoservices/az-tf-mlz-"
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.17.0
+          terraform_wrapper: false
+
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
+        with:
+          tflint_version: v0.65.0
+
+      - name: Install terraform-docs
+        working-directory: ${{ runner.temp }}
+        run: |
+          version=0.24.0
+          base=https://github.com/terraform-docs/terraform-docs/releases/download/v$version
+          curl -sSfLO "$base/terraform-docs-v$version-linux-amd64.tar.gz"
+          curl -sSfLO "$base/terraform-docs-v$version.sha256sum"
+          grep "terraform-docs-v$version-linux-amd64.tar.gz" "terraform-docs-v$version.sha256sum" | sha256sum --check -
+          tar -xzf "terraform-docs-v$version-linux-amd64.tar.gz" terraform-docs
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: scripts/check.sh
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          scripts/check.sh
+        env:
+          GITHUB_TOKEN: ${{ github.token }} # tflint --init: API rate limit and plugin attestations
+
