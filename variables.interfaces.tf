@@ -12,7 +12,7 @@ Controls the Resource Lock configuration for this resource. The following proper
 - `name` - (Optional) The name of the lock. If not specified, a name will be generated based on the `kind` value. Changing this forces the creation of a new resource.
 - `notes` - (Optional) Notes about the lock. This value maps to `Microsoft.Authorization/locks.properties.notes`.
 
-With `ReadOnly`, the lock is removed around a change of the routes and created again afterwards; a change of the table's own settings (`tags`, `bgp_route_propagation_enabled`) alone is refused by Azure until the lock is removed.
+With `ReadOnly`, the lock is removed around a change of the routes and created again afterwards; a change of the table's own settings (`tags`, `bgp_route_propagation_enabled`) alone is refused by Azure until the lock is removed. With `azure_managed_routes_enabled`, a `CanNotDelete` lock is also removed around a change of the routes, because it refuses deleting a child route.
 DESCRIPTION
 
   validation {

@@ -6,7 +6,7 @@ variable "location" {
 
 variable "name" {
   type        = string
-  description = "Name of the route table. A replacement (a change of `name`, `parent_id` or `location`) creates the new table before the old one is deleted, because Azure deletes no route table a subnet uses: subnets in the same configuration move to the new table first. A change of `location` alone therefore also needs a new `name`."
+  description = "Name of the route table. A replacement (a change of `name`, `parent_id`, `location` or `azure_managed_routes_enabled`) creates the new table before the old one is deleted, because Azure deletes no route table a subnet uses: subnets in the same configuration move to the new table first. A change of `location` or `azure_managed_routes_enabled` therefore also needs a new `name` (with the old one, the create fails with \"Resource already exists\")."
   nullable    = false
 
   validation {
@@ -24,6 +24,19 @@ variable "parent_id" {
     condition     = can(provider::azapi::parse_resource_id("Microsoft.Resources/resourceGroups", var.parent_id))
     error_message = "`parent_id` must be a resource group resource ID."
   }
+}
+
+variable "azure_managed_routes_enabled" {
+  type        = bool
+  default     = false
+  description = <<DESCRIPTION
+(Optional) Whether Azure adds routes of its own to the table, as for the subnet of a SQL Managed Instance (its network intent policy adds `Microsoft.Sql-managedInstances_UseOnly_*` routes when the instance is created, and Azure refuses any table write without them: `ConflictWithNetworkIntentPolicy`). Defaults to `false`: the module writes the routes in the table's body and removes any route it does not know.
+
+When `true`, every write of the table sends the routes the table holds in Azure at that moment, Azure's included, and each of `routes` is written as its own child resource (`modules/route`): the module adds, changes and removes only its own routes and never compares Azure's.
+
+**Set at creation only.** Changing it replaces the table, which needs a new `name` (the new table is created before the old one is deleted, see `name`): azapi cannot start keeping a table's live routes once its state holds routes.
+DESCRIPTION
+  nullable    = false
 }
 
 variable "bgp_route_propagation_enabled" {

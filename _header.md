@@ -7,6 +7,11 @@ A Fortytwo managed landing zone (MLZ) module for an Azure route table, in AzAPI:
   a write of the table carries, so a table written without them loses every route on any change of the
   table (a tag change) until the routes are written again. Every write here carries them all, matched by
   name, and a removed route is removed from Azure.
+- **Tables Azure adds routes to** (`azure_managed_routes_enabled`, set at creation only). A SQL Managed
+  Instance adds its own routes to its subnet's table (its network intent policy), and Azure refuses any
+  write of the table without them. With this set, every write of the table sends the routes it holds in
+  Azure at that moment, and the module's routes are child resources (`modules/route`), so the module
+  adds, changes and removes only its own. Changing it replaces the table, which needs a new `name`.
 - **`routes` takes the shape of subscription vending's route table routes** (`Azure/avm-ptn-alz-sub-vending`)
   and of the connectivity compositions' `spoke_default_routes`, which can be passed straight in: a map of
   `name`, `address_prefix` (a CIDR prefix or a service tag), `next_hop_type` and, for a `VirtualAppliance`
@@ -15,14 +20,16 @@ A Fortytwo managed landing zone (MLZ) module for an Azure route table, in AzAPI:
   `GatewaySubnet` needs it. A spoke behind a hub firewall turns it off, so that on-premises prefixes learned
   over BGP do not bypass the firewall.
 - **Subnets attach themselves**: a subnet sets `routeTable.id` to `resource_id`, as in the example. Azure
-  deletes no route table a subnet uses, so a replacement (a change of `name`, `parent_id` or `location`)
-  creates the new table first: subnets in the same configuration move to it, then the old one is deleted.
-  Subnets elsewhere must move before the old table can go, and a change of `location` alone also needs a
-  new `name`.
-- **Locks.** A `CanNotDelete` lock stays in place while routes are added, changed or removed. A `ReadOnly`
-  lock refuses every write of the table, so it is removed around a change of the routes (the table's
-  children) and created again afterwards, as for any MLZ module's children; a change of the table's own
-  settings (`tags`, `bgp_route_propagation_enabled`) alone is refused until the lock is removed.
+  deletes no route table a subnet uses, so a replacement (a change of `name`, `parent_id`, `location` or
+  `azure_managed_routes_enabled`) creates the new table first: subnets in the same configuration move to
+  it, then the old one is deleted. Subnets elsewhere must move before the old table can go, and a
+  replacement for another reason than a rename also needs a new `name`.
+- **Locks.** A `ReadOnly` lock refuses every write of the table, so it is removed around a change of the
+  routes (the table's children) and created again afterwards, as for any MLZ module's children; a change
+  of the table's own settings (`tags`, `bgp_route_propagation_enabled`) alone is refused until the lock is
+  removed. A `CanNotDelete` lock stays in place while routes in the body are added, changed or removed;
+  with Azure-managed routes it is removed around a route's change too, because it refuses deleting a child
+  route.
 - Lock and role assignments, as in Azure Verified Modules, through
   [`az-tf-mlz-interfaces`](https://github.com/fortytwoservices/az-tf-mlz-interfaces). Route tables have no
   diagnostic settings.
@@ -41,5 +48,5 @@ module "spoke_route_table" {
 }
 ```
 
-The example deploys a hub's `AzureFirewallSubnet` table and a spoke's table, each used by a subnet
-(`default`).
+The examples deploy a hub's `AzureFirewallSubnet` table and a spoke's table, each used by a subnet
+(`default`), and the table of a subnet for a SQL Managed Instance (`sql_managed_instance_subnet`).

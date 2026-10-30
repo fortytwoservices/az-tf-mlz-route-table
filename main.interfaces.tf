@@ -9,7 +9,7 @@ module "interfaces" {
   role_assignment_definition_scope = var.parent_id
   lock                             = var.lock
   role_assignments                 = var.role_assignments
-  lock_dependencies                = local.lock_dependencies # the routes, with a ReadOnly lock
+  lock_dependencies                = local.lock_dependencies # the routes (locals.tf)
   resource_types                   = var.resource_types      # its interface keys are read
   ignore_body_changes              = var.ignore_body_changes
   retry                            = var.retry
