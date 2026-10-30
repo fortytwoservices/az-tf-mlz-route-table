@@ -1,9 +1,9 @@
-output "principal_id" {
-  description = "Object ID of the identity's service principal."
-  value       = module.user_assigned_identity.principal_id
+output "firewall_route_table_resource_id" {
+  description = "Resource ID of the hub's AzureFirewallSubnet route table."
+  value       = module.firewall_route_table.resource_id
 }
 
-output "resource_id" {
-  description = "Resource ID of the user-assigned identity."
-  value       = module.user_assigned_identity.resource_id
+output "spoke_route_table_resource_id" {
+  description = "Resource ID of the spoke's route table."
+  value       = module.spoke_route_table.resource_id
 }

@@ -22,9 +22,9 @@ resource "random_string" "suffix" {
 
 resource "azapi_resource" "resource_group" {
   type      = "Microsoft.Resources/resourceGroups@2024-11-01"
-  name      = "rg-mlz-it-${random_string.suffix.result}"
+  name      = "rg-mlz-rt-it-${random_string.suffix.result}"
   parent_id = "/subscriptions/${data.azapi_client_config.current.subscription_id}"
-  location  = "norwayeast"
+  location  = "swedencentral"
 }
 
 output "location" {
