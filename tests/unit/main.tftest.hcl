@@ -202,8 +202,8 @@ run "azure_managed_routes" {
     error_message = "The mode should be recorded, so that changing it replaces the table."
   }
   assert {
-    condition     = jsonencode(keys(module.route)) == jsonencode(["default", "onprem"]) && module.route["default"].name == "default"
-    error_message = "Each route should be a child resource, keyed and named by the route's name."
+    condition     = jsonencode(keys(module.route)) == jsonencode(["a", "b"]) && module.route["a"].name == "default" && module.route["b"].name == "onprem"
+    error_message = "Each route should be a child resource, keyed by the caller's key (known when planning) and named by the route's name."
   }
   assert {
     condition     = jsonencode(local.lock_dependencies) == jsonencode({ for name, route in module.route : name => route.lock_dependency })

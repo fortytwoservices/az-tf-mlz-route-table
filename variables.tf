@@ -34,7 +34,9 @@ variable "azure_managed_routes_enabled" {
 
 When `true`, every write of the table sends the routes the table holds in Azure at that moment, Azure's included, and each of `routes` is written as its own child resource (`modules/route`): the module adds, changes and removes only its own routes and never compares Azure's.
 
-**Set at creation only.** Changing it replaces the table, which needs a new `name` (the new table is created before the old one is deleted, see `name`): azapi cannot start keeping a table's live routes once its state holds routes.
+**Set at creation only.** Changing it replaces the table, which needs a new `name` (the new table is created before the old one is deleted, see `name`): in place, the module's routes would have to move between the table's body and child resources.
+
+When a table with this set is replaced (a change of `name`, `parent_id`, `location` or this), subnets in the same configuration move to the new table once its routes are written, but the old table's routes may be deleted shortly before they move (Azure's stay): a route is not created before it is deleted, because the table's lock must be removed before a route can be deleted. For no such window, create the new table with a second module call, move the subnets to it, then remove the old call.
 DESCRIPTION
   nullable    = false
 }
@@ -62,7 +64,7 @@ variable "routes" {
 - `next_hop_type` - `VirtualAppliance`, `VirtualNetworkGateway` (a VPN gateway only, and not for IPv6 prefixes), `VnetLocal`, `Internet` (Azure accepts only public destinations, `0.0.0.0/0` or a service tag) or `None` (drop).
 - `next_hop_in_ip_address` - (Optional) The appliance's private IP address, for example a firewall's: required for `VirtualAppliance` and refused for every other type. In the prefix's address family, written as Terraform's `cidrhost` writes it.
 
-A table holds at most 400 routes.
+A table holds at most 400 routes. With `azure_managed_routes_enabled`, each route is a child resource keyed by its map key; a new `name` replaces the route.
 DESCRIPTION
   nullable    = false
 

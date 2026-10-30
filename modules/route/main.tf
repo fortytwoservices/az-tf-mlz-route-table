@@ -25,4 +25,8 @@ resource "azapi_resource" "this" {
       delete = timeouts.value.delete
     }
   }
+
+  # Not create_before_destroy: Terraform then deletes a route only after the resources that depend on it
+  # are written, and the table's lock depends on its routes, so a route removed under the lock was deleted
+  # after the lock was back (ScopeLocked, sandbox 2026-10-30).
 }

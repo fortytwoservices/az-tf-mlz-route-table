@@ -2,6 +2,12 @@ locals {
   # Keyed by route name, the name Azure matches routes by.
   routes = { for route in values(var.routes) : route.name => route }
 
+  # The body's routes with Azure-managed routes: an empty list of the routes' type, not an empty tuple. When
+  # a table switches to the mode, Terraform first plans it against the old state, and azapi converts the
+  # routes held there into this value's type, which only a list can take (a tuple's type fixes its length:
+  # "tuple element size not match"); the replacement is planned after that.
+  no_routes = slice(tolist([{ name = "", properties = { addressPrefix = "", nextHopType = "", nextHopIpAddress = "" } }]), 0, 0)
+
   # On an update, azapi reads the table and sends its live value at an ignored path, so with Azure-managed
   # routes every write carries Azure's routes and the module's child routes.
   ignore_body_changes = var.azure_managed_routes_enabled ? distinct(concat(var.ignore_body_changes.network_route_tables, ["properties.routes"])) : var.ignore_body_changes.network_route_tables

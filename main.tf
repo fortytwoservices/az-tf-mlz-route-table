@@ -7,18 +7,20 @@ resource "azapi_resource" "this" {
   # with the ones a PUT carries, so a table written without them (a tag change) loses every route. Routes are
   # sent in name order, with `nextHopIpAddress` null except for an appliance (Azure then reports no address).
   # With Azure-managed routes the body holds none (the key stays: azapi only overrides keys the body has),
-  # and every write sends the table's live routes instead (`ignore_body_changes`).
+  # and every write sends the table's live routes instead (`ignore_body_changes`). Either way the routes are
+  # a list (see `local.no_routes`); azapi plans no change for the type alone (it keeps the state's body when
+  # the two are semantically equal).
   body = {
     properties = {
       disableBgpRoutePropagation = !var.bgp_route_propagation_enabled
-      routes = [for name in sort(keys(local.routes)) : {
+      routes = var.azure_managed_routes_enabled ? local.no_routes : [for name in sort(keys(local.routes)) : {
         name = name
         properties = {
           addressPrefix    = local.routes[name].address_prefix
           nextHopType      = local.routes[name].next_hop_type
           nextHopIpAddress = local.routes[name].next_hop_in_ip_address
         }
-      } if !var.azure_managed_routes_enabled]
+      }]
     }
   }
   ignore_body_changes = length(local.ignore_body_changes) > 0 ? local.ignore_body_changes : null
