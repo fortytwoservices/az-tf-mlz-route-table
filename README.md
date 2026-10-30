@@ -9,6 +9,11 @@ A Fortytwo managed landing zone (MLZ) module for an Azure route table, in AzAPI:
   a write of the table carries, so a table written without them loses every route on any change of the
   table (a tag change) until the routes are written again. Every write here carries them all, matched by
   name, and a removed route is removed from Azure.
+- **Tables Azure adds routes to** (`azure_managed_routes_enabled`, set at creation only). A SQL Managed
+  Instance adds its own routes to its subnet's table (its network intent policy), and Azure refuses any
+  write of the table without them. With this set, every write of the table sends the routes it holds in
+  Azure at that moment, and the module's routes are child resources (`modules/route`), so the module
+  adds, changes and removes only its own. Changing it replaces the table, which needs a new `name`.
 - **`routes` takes the shape of subscription vending's route table routes** (`Azure/avm-ptn-alz-sub-vending`)
   and of the connectivity compositions' `spoke_default_routes`, which can be passed straight in: a map of
   `name`, `address_prefix` (a CIDR prefix or a service tag), `next_hop_type` and, for a `VirtualAppliance`
@@ -17,14 +22,16 @@ A Fortytwo managed landing zone (MLZ) module for an Azure route table, in AzAPI:
   `GatewaySubnet` needs it. A spoke behind a hub firewall turns it off, so that on-premises prefixes learned
   over BGP do not bypass the firewall.
 - **Subnets attach themselves**: a subnet sets `routeTable.id` to `resource_id`, as in the example. Azure
-  deletes no route table a subnet uses, so a replacement (a change of `name`, `parent_id` or `location`)
-  creates the new table first: subnets in the same configuration move to it, then the old one is deleted.
-  Subnets elsewhere must move before the old table can go, and a change of `location` alone also needs a
-  new `name`.
-- **Locks.** A `CanNotDelete` lock stays in place while routes are added, changed or removed. A `ReadOnly`
-  lock refuses every write of the table, so it is removed around a change of the routes (the table's
-  children) and created again afterwards, as for any MLZ module's children; a change of the table's own
-  settings (`tags`, `bgp_route_propagation_enabled`) alone is refused until the lock is removed.
+  deletes no route table a subnet uses, so a replacement (a change of `name`, `parent_id`, `location` or
+  `azure_managed_routes_enabled`) creates the new table first: subnets in the same configuration move to
+  it, then the old one is deleted. Subnets elsewhere must move before the old table can go, and a
+  replacement for another reason than a rename also needs a new `name`.
+- **Locks.** A `ReadOnly` lock refuses every write of the table, so it is removed around a change of the
+  routes (the table's children) and created again afterwards, as for any MLZ module's children; a change
+  of the table's own settings (`tags`, `bgp_route_propagation_enabled`) alone is refused until the lock is
+  removed. A `CanNotDelete` lock stays in place while routes in the body are added, changed or removed;
+  with Azure-managed routes it is removed around a route's change too, because it refuses deleting a child
+  route.
 - Lock and role assignments, as in Azure Verified Modules, through
   [`az-tf-mlz-interfaces`](https://github.com/fortytwoservices/az-tf-mlz-interfaces). Route tables have no
   diagnostic settings.
@@ -43,8 +50,8 @@ module "spoke_route_table" {
 }
 ```
 
-The example deploys a hub's `AzureFirewallSubnet` table and a spoke's table, each used by a subnet
-(`default`).
+The examples deploy a hub's `AzureFirewallSubnet` table and a spoke's table, each used by a subnet
+(`default`), and the table of a subnet for a SQL Managed Instance (`sql_managed_instance_subnet`).
 
 <!-- markdownlint-disable MD033 -->
 ## Requirements
@@ -60,6 +67,7 @@ The following requirements are needed by this module:
 The following resources are used by this module:
 
 - [azapi_resource.this](https://registry.terraform.io/providers/Azure/azapi/latest/docs/resources/resource) (resource)
+- [terraform_data.azure_managed_routes](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) (resource)
 
 <!-- markdownlint-disable MD013 -->
 ## Required Inputs
@@ -74,7 +82,7 @@ Type: `string`
 
 ### <a name="input_name"></a> [name](#input\_name)
 
-Description: Name of the route table. A replacement (a change of `name`, `parent_id` or `location`) creates the new table before the old one is deleted, because Azure deletes no route table a subnet uses: subnets in the same configuration move to the new table first. A change of `location` alone therefore also needs a new `name`.
+Description: Name of the route table. A replacement (a change of `name`, `parent_id`, `location` or `azure_managed_routes_enabled`) creates the new table before the old one is deleted, because Azure deletes no route table a subnet uses: subnets in the same configuration move to the new table first. A change of `location` or `azure_managed_routes_enabled` therefore also needs a new `name` (with the old one, the create fails with "Resource already exists").
 
 Type: `string`
 
@@ -87,6 +95,20 @@ Type: `string`
 ## Optional Inputs
 
 The following input variables are optional (have default values):
+
+### <a name="input_azure_managed_routes_enabled"></a> [azure\_managed\_routes\_enabled](#input\_azure\_managed\_routes\_enabled)
+
+Description: (Optional) Whether Azure adds routes of its own to the table, as for the subnet of a SQL Managed Instance (its network intent policy adds `Microsoft.Sql-managedInstances_UseOnly_*` routes when the instance is created, and Azure refuses any table write without them: `ConflictWithNetworkIntentPolicy`). Defaults to `false`: the module writes the routes in the table's body and removes any route it does not know.
+
+When `true`, every write of the table sends the routes the table holds in Azure at that moment, Azure's included, and each of `routes` is written as its own child resource (`modules/route`): the module adds, changes and removes only its own routes and never compares Azure's.
+
+**Set at creation only.** Changing it replaces the table, which needs a new `name` (the new table is created before the old one is deleted, see `name`): in place, the module's routes would have to move between the table's body and child resources.
+
+When a table with this set is replaced (a change of `name`, `parent_id`, `location` or this), subnets in the same configuration move to the new table once its routes are written, but the old table's routes may be deleted shortly before they move (Azure's stay): a route is not created before it is deleted, because the table's lock must be removed before a route can be deleted. For no such window, create the new table with a second module call, move the subnets to it, then remove the old call.
+
+Type: `bool`
+
+Default: `false`
 
 ### <a name="input_bgp_route_propagation_enabled"></a> [bgp\_route\_propagation\_enabled](#input\_bgp\_route\_propagation\_enabled)
 
@@ -102,9 +124,11 @@ Description: Paths in each resource's `body` whose changes the AzAPI provider ig
 
 Paths use dot notation, for example `properties.disableBgpRoutePropagation`. Individual list items cannot be targeted; ignore the whole list property instead. Configuration changes at an ignored path are **not** sent to Azure until that path is removed from the list. Changes take effect only after an apply, because the value is held in provider-private state.
 
-- `network_route_tables` - Ignored body paths for the route table.
+- `network_route_tables` - Ignored body paths for the route table. With `azure_managed_routes_enabled`, the module adds `properties.routes`.
 - `authorization_locks` - Ignored body paths for the route table's lock.
 - `authorization_role_assignments` - Ignored body paths for the route table's role assignments.
+- `network_route_tables_routes` - Slot for the `route` submodule (Azure-managed routes only).
+  - `network_route_tables_routes` - Ignored body paths for each route.
 
 Type:
 
@@ -113,6 +137,10 @@ object({
     network_route_tables           = optional(list(string), [])
     authorization_locks            = optional(list(string), [])
     authorization_role_assignments = optional(list(string), [])
+
+    network_route_tables_routes = optional(object({
+      network_route_tables_routes = optional(list(string), [])
+    }), {})
   })
 ```
 
@@ -126,7 +154,7 @@ Description: Controls the Resource Lock configuration for this resource. The fol
 - `name` - (Optional) The name of the lock. If not specified, a name will be generated based on the `kind` value. Changing this forces the creation of a new resource.
 - `notes` - (Optional) Notes about the lock. This value maps to `Microsoft.Authorization/locks.properties.notes`.
 
-With `ReadOnly`, the lock is removed around a change of the routes and created again afterwards; a change of the table's own settings (`tags`, `bgp_route_propagation_enabled`) alone is refused by Azure until the lock is removed.
+With `ReadOnly`, the lock is removed around a change of the routes and created again afterwards; a change of the table's own settings (`tags`, `bgp_route_propagation_enabled`) alone is refused by Azure until the lock is removed. With `azure_managed_routes_enabled`, a `CanNotDelete` lock is also removed around a change of the routes, because it refuses deleting a child route.
 
 Type:
 
@@ -142,11 +170,13 @@ Default: `null`
 
 ### <a name="input_resource_types"></a> [resource\_types](#input\_resource\_types)
 
-Description: Override the AzAPI `<provider>/<resource>@<api-version>` strings used by this module. Each key defaults to a tested value; supply only the keys you want to override.
+Description: Override the AzAPI `<provider>/<resource>@<api-version>` strings used by this module and its submodule. Each key defaults to a tested value; supply only the keys you want to override.
 
 - `network_route_tables` - The route table.
 - `authorization_locks` - The lock on the route table.
 - `authorization_role_assignments` - Role assignments on the route table.
+- `network_route_tables_routes` - Slot for the `route` submodule (Azure-managed routes only). Defaults live in the submodule.
+  - `network_route_tables_routes` - Each route.
 
 Type:
 
@@ -155,6 +185,10 @@ object({
     network_route_tables           = optional(string, "Microsoft.Network/routeTables@2025-07-01")
     authorization_locks            = optional(string, "Microsoft.Authorization/locks@2020-05-01")
     authorization_role_assignments = optional(string, "Microsoft.Authorization/roleAssignments@2022-04-01")
+
+    network_route_tables_routes = optional(object({
+      network_route_tables_routes = optional(string)
+    }), {})
   })
 ```
 
@@ -225,7 +259,7 @@ Description: (Optional) The table's routes, keyed by any stable name, in the sha
 - `next_hop_type` - `VirtualAppliance`, `VirtualNetworkGateway` (a VPN gateway only, and not for IPv6 prefixes), `VnetLocal`, `Internet` (Azure accepts only public destinations, `0.0.0.0/0` or a service tag) or `None` (drop).
 - `next_hop_in_ip_address` - (Optional) The appliance's private IP address, for example a firewall's: required for `VirtualAppliance` and refused for every other type. In the prefix's address family, written as Terraform's `cidrhost` writes it.
 
-A table holds at most 400 routes.
+A table holds at most 400 routes. With `azure_managed_routes_enabled`, each route is a child resource keyed by its map key; a new `name` replaces the route.
 
 Type:
 
@@ -280,7 +314,7 @@ Description: Name of the route table.
 
 ### <a name="output_resource_id"></a> [resource\_id](#output\_resource\_id)
 
-Description: Resource ID of the route table, for the `routeTable` of the subnets that use it.
+Description: Resource ID of the route table, for the `routeTable` of the subnets that use it. With Azure-managed routes, a subnet that uses it is written only after the table's routes, so it moves to a replaced table once the new table's routes exist (the old table's routes may be deleted shortly before: see `azure_managed_routes_enabled`).
 
 ## Modules
 
@@ -291,6 +325,12 @@ The following Modules are called:
 Source: git::https://github.com/fortytwoservices/az-tf-mlz-interfaces.git
 
 Version: v0.1.1
+
+### <a name="module_route"></a> [route](#module\_route)
+
+Source: ./modules/route
+
+Version:
 
 ## Development
 

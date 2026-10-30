@@ -10,6 +10,11 @@ terraform {
   }
 }
 
+variable "azure_managed_routes_enabled" {
+  type    = bool
+  default = false
+}
+
 variable "location" {
   type = string
 }
@@ -29,9 +34,10 @@ variable "suffix" {
 module "route_table" {
   source = "../../.."
 
-  name      = var.route_table_name
-  parent_id = var.resource_group_id
-  location  = var.location
+  name                         = var.route_table_name
+  parent_id                    = var.resource_group_id
+  location                     = var.location
+  azure_managed_routes_enabled = var.azure_managed_routes_enabled
   routes = {
     default = { name = "default", address_prefix = "0.0.0.0/0", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "10.100.0.4" }
   }
