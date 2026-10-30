@@ -1,7 +1,9 @@
-# Real Azure, no mocks: ARM_SUBSCRIPTION_ID=<test subscription> terraform test -test-directory=tests/integration
-# Proves what mocks cannot: credentials written in parallel are serialised, survive an update of the
-# identity, can be removed or updated in place under the lock (ReadOnly too), and the lock is removed
-# before everything else on destroy.
+# Real Azure, no mocks: ARM_SUBSCRIPTION_ID=<test subscription> scripts/integration.sh .
+# Proves what mocks cannot, reading the table back from Azure after every write: every next hop type, a
+# service tag and an IPv6 route are accepted; a change of the table itself (tags, BGP propagation) keeps
+# every route, which is why the routes are in the table's body; routes are added, changed and removed under
+# a CanNotDelete lock and under a ReadOnly lock; a table a subnet uses is replaced (renamed) under its lock,
+# the subnet moving to the new table before the old one is deleted. Free: route tables cost nothing.
 
 run "setup" {
   module {
@@ -11,14 +13,18 @@ run "setup" {
 
 run "create" {
   variables {
-    name      = "id-mlz-it-${run.setup.suffix}"
+    name      = "rt-mlz-it-${run.setup.suffix}"
     parent_id = run.setup.resource_group_id
     location  = run.setup.location
-    federated_identity_credentials = {
-      one   = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:one" }
-      two   = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:two" }
-      three = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:three" }
+    routes = {
+      default = { name = "default", address_prefix = "0.0.0.0/0", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "10.100.0.4" }
+      onprem  = { name = "onprem", address_prefix = "192.168.0.0/16", next_hop_type = "VirtualNetworkGateway" }
+      drop    = { name = "drop", address_prefix = "10.200.0.0/16", next_hop_type = "None" }
+      local   = { name = "local", address_prefix = "10.100.8.0/24", next_hop_type = "VnetLocal" }
+      storage = { name = "storage", address_prefix = "Storage.SwedenCentral", next_hop_type = "Internet" }
+      v6      = { name = "v6", address_prefix = "fd00:db8::/48", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "fd00:db8:1::4" }
     }
+    tags = { test = "create" }
     lock = { kind = "CanNotDelete" }
     role_assignments = {
       reader = { role_definition_id_or_name = "Reader", principal_id = run.setup.object_id }
@@ -26,80 +32,100 @@ run "create" {
   }
 
   assert {
-    condition     = length(output.federated_identity_credential_resource_ids) == 3
-    error_message = "All three credentials should be created."
-  }
-  assert {
-    condition     = can(regex("^[0-9a-f-]{36}$", output.principal_id)) && can(regex("^[0-9a-f-]{36}$", output.client_id))
-    error_message = "principal_id and client_id should be read back from Azure."
+    condition     = module.interfaces.lock_resource_id != null && jsonencode(keys(module.interfaces.role_assignment_resource_ids)) == jsonencode(["reader"])
+    error_message = "The table should be locked and have its role assignment."
   }
 }
 
-run "update_identity" {
-  variables {
-    name      = "id-mlz-it-${run.setup.suffix}"
-    parent_id = run.setup.resource_group_id
-    location  = run.setup.location
-    federated_identity_credentials = {
-      one   = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:one" }
-      two   = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:two" }
-      three = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:three" }
-    }
-    lock = { kind = "CanNotDelete" }
-    role_assignments = {
-      reader = { role_definition_id_or_name = "Reader", principal_id = run.setup.object_id }
-    }
-    isolation_scope = "Regional"
-    tags            = { updated = "true" } # a PUT of the identity without its credentials
-  }
-
-  assert {
-    condition     = azapi_resource.this.tags == tomap({ updated = "true" })
-    error_message = "The identity should be updated in place."
-  }
-}
-
-run "credentials_survive" {
+run "read_created" {
   module {
     source = "./tests/integration/read"
   }
 
   variables {
-    credential_ids = run.update_identity.federated_identity_credential_resource_ids
+    route_table_id = run.create.resource_id
   }
 
   assert {
-    condition     = output.subjects.two == "repo:example-org/example-repo:environment:two" && length(output.subjects) == 3
-    error_message = "The credentials should still exist after the identity was updated."
+    condition = jsonencode(output.routes) == jsonencode({
+      default = { address_prefix = "0.0.0.0/0", next_hop_in_ip_address = "10.100.0.4", next_hop_type = "VirtualAppliance" }
+      drop    = { address_prefix = "10.200.0.0/16", next_hop_in_ip_address = null, next_hop_type = "None" }
+      local   = { address_prefix = "10.100.8.0/24", next_hop_in_ip_address = null, next_hop_type = "VnetLocal" }
+      onprem  = { address_prefix = "192.168.0.0/16", next_hop_in_ip_address = null, next_hop_type = "VirtualNetworkGateway" }
+      storage = { address_prefix = "Storage.SwedenCentral", next_hop_in_ip_address = null, next_hop_type = "Internet" }
+      v6      = { address_prefix = "fd00:db8::/48", next_hop_in_ip_address = "fd00:db8:1::4", next_hop_type = "VirtualAppliance" }
+    })
+    error_message = "Azure should hold the six routes as sent: ${jsonencode(output.routes)}."
   }
-}
-
-run "isolation_scope_set_in_azure" {
-  module {
-    source = "./tests/integration/read_identity"
-  }
-
-  variables {
-    identity_id = run.update_identity.resource_id
-  }
-
   assert {
-    condition     = output.isolation_scope == "Regional"
-    error_message = "Azure should report the Regional isolation scope set by update_identity."
+    condition     = output.bgp_route_propagation_enabled && jsonencode(output.tags) == jsonencode({ test = "create" })
+    error_message = "Azure should hold BGP propagation on and the tags."
   }
 }
 
-run "remove_credential_under_lock" {
-  # A credential is deleted while the lock stays configured: the lock is removed and created again
-  # around the change. The scope goes back to Azure's default, which must reach Azure.
+run "update_table" {
+  # A change of the table itself: new tags and BGP propagation off, the routes as they are.
   variables {
-    name      = "id-mlz-it-${run.setup.suffix}"
+    name      = "rt-mlz-it-${run.setup.suffix}"
     parent_id = run.setup.resource_group_id
     location  = run.setup.location
-    federated_identity_credentials = {
-      one = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:one" }
-      two = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:two" }
+    routes = {
+      default = { name = "default", address_prefix = "0.0.0.0/0", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "10.100.0.4" }
+      onprem  = { name = "onprem", address_prefix = "192.168.0.0/16", next_hop_type = "VirtualNetworkGateway" }
+      drop    = { name = "drop", address_prefix = "10.200.0.0/16", next_hop_type = "None" }
+      local   = { name = "local", address_prefix = "10.100.8.0/24", next_hop_type = "VnetLocal" }
+      storage = { name = "storage", address_prefix = "Storage.SwedenCentral", next_hop_type = "Internet" }
+      v6      = { name = "v6", address_prefix = "fd00:db8::/48", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "fd00:db8:1::4" }
     }
+    bgp_route_propagation_enabled = false
+    tags                          = { test = "update" }
+    lock                          = { kind = "CanNotDelete" }
+    role_assignments = {
+      reader = { role_definition_id_or_name = "Reader", principal_id = run.setup.object_id }
+    }
+  }
+
+  assert {
+    condition     = output.resource_id == run.create.resource_id
+    error_message = "The table should be updated in place."
+  }
+}
+
+run "routes_survive_table_update" {
+  module {
+    source = "./tests/integration/read"
+  }
+
+  variables {
+    route_table_id = run.update_table.resource_id
+  }
+
+  assert {
+    condition     = jsonencode(keys(output.routes)) == jsonencode(["default", "drop", "local", "onprem", "storage", "v6"]) && output.routes.default.next_hop_in_ip_address == "10.100.0.4"
+    error_message = "Every route should survive the update of the table: ${jsonencode(output.routes)}."
+  }
+  assert {
+    condition     = !output.bgp_route_propagation_enabled && jsonencode(output.tags) == jsonencode({ test = "update" })
+    error_message = "Azure should hold BGP propagation off and the new tags."
+  }
+}
+
+run "change_routes" {
+  # Under the CanNotDelete lock, which stays in place: a route added (spoke2), one changed (default's
+  # address) and one removed (drop); BGP propagation back on.
+  variables {
+    name      = "rt-mlz-it-${run.setup.suffix}"
+    parent_id = run.setup.resource_group_id
+    location  = run.setup.location
+    routes = {
+      default = { name = "default", address_prefix = "0.0.0.0/0", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "10.100.0.5" }
+      onprem  = { name = "onprem", address_prefix = "192.168.0.0/16", next_hop_type = "VirtualNetworkGateway" }
+      local   = { name = "local", address_prefix = "10.100.8.0/24", next_hop_type = "VnetLocal" }
+      storage = { name = "storage", address_prefix = "Storage.SwedenCentral", next_hop_type = "Internet" }
+      v6      = { name = "v6", address_prefix = "fd00:db8::/48", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "fd00:db8:1::4" }
+      spoke2  = { name = "spoke2", address_prefix = "10.100.9.0/24", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "10.100.0.5" }
+    }
+    tags = { test = "update" }
     lock = { kind = "CanNotDelete" }
     role_assignments = {
       reader = { role_definition_id_or_name = "Reader", principal_id = run.setup.object_id }
@@ -107,53 +133,51 @@ run "remove_credential_under_lock" {
   }
 
   assert {
-    condition     = keys(output.federated_identity_credential_resource_ids) == ["one", "two"] && module.interfaces.lock_resource_id != null
-    error_message = "The third credential should be gone and the lock back."
+    condition     = output.resource_id == run.create.resource_id && module.interfaces.lock_resource_id != null
+    error_message = "The table should be updated in place and stay locked."
   }
 }
 
-run "isolation_scope_reset_in_azure" {
+run "read_changed" {
   module {
-    source = "./tests/integration/read_identity"
+    source = "./tests/integration/read"
   }
 
   variables {
-    identity_id = run.remove_credential_under_lock.resource_id
+    route_table_id = run.change_routes.resource_id
   }
 
   assert {
-    condition     = output.isolation_scope == "None"
-    error_message = "Azure should report the default isolation scope again once isolation_scope is no longer set."
+    condition = jsonencode(output.routes) == jsonencode({
+      default = { address_prefix = "0.0.0.0/0", next_hop_in_ip_address = "10.100.0.5", next_hop_type = "VirtualAppliance" }
+      local   = { address_prefix = "10.100.8.0/24", next_hop_in_ip_address = null, next_hop_type = "VnetLocal" }
+      onprem  = { address_prefix = "192.168.0.0/16", next_hop_in_ip_address = null, next_hop_type = "VirtualNetworkGateway" }
+      spoke2  = { address_prefix = "10.100.9.0/24", next_hop_in_ip_address = "10.100.0.5", next_hop_type = "VirtualAppliance" }
+      storage = { address_prefix = "Storage.SwedenCentral", next_hop_in_ip_address = null, next_hop_type = "Internet" }
+      v6      = { address_prefix = "fd00:db8::/48", next_hop_in_ip_address = "fd00:db8:1::4", next_hop_type = "VirtualAppliance" }
+    })
+    error_message = "Azure should hold spoke2, default's new address and no drop route: ${jsonencode(output.routes)}."
+  }
+  assert {
+    condition     = output.bgp_route_propagation_enabled
+    error_message = "Azure should hold BGP propagation on again."
   }
 }
 
 run "readonly_lock" {
   variables {
-    name      = "id-mlz-it-${run.setup.suffix}"
+    name      = "rt-mlz-it-${run.setup.suffix}"
     parent_id = run.setup.resource_group_id
     location  = run.setup.location
-    federated_identity_credentials = {
-      one = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:one" }
-      two = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:two" }
+    routes = {
+      default = { name = "default", address_prefix = "0.0.0.0/0", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "10.100.0.5" }
+      onprem  = { name = "onprem", address_prefix = "192.168.0.0/16", next_hop_type = "VirtualNetworkGateway" }
+      local   = { name = "local", address_prefix = "10.100.8.0/24", next_hop_type = "VnetLocal" }
+      storage = { name = "storage", address_prefix = "Storage.SwedenCentral", next_hop_type = "Internet" }
+      v6      = { name = "v6", address_prefix = "fd00:db8::/48", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "fd00:db8:1::4" }
+      spoke2  = { name = "spoke2", address_prefix = "10.100.9.0/24", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "10.100.0.5" }
     }
-    lock = { kind = "ReadOnly" }
-    role_assignments = {
-      reader = { role_definition_id_or_name = "Reader", principal_id = run.setup.object_id }
-    }
-  }
-}
-
-run "update_credential_under_readonly_lock" {
-  # A credential updated in place keeps its ID, and a ReadOnly lock blocks the write: the credential's
-  # lock_dependency changes with its body, so the lock is removed and created again around it.
-  variables {
-    name      = "id-mlz-it-${run.setup.suffix}"
-    parent_id = run.setup.resource_group_id
-    location  = run.setup.location
-    federated_identity_credentials = {
-      one = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:one" }
-      two = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:two-updated" }
-    }
+    tags = { test = "update" }
     lock = { kind = "ReadOnly" }
     role_assignments = {
       reader = { role_definition_id_or_name = "Reader", principal_id = run.setup.object_id }
@@ -161,41 +185,120 @@ run "update_credential_under_readonly_lock" {
   }
 
   assert {
-    condition     = output.federated_identity_credential_resource_ids["two"] == run.readonly_lock.federated_identity_credential_resource_ids["two"] && module.interfaces.lock_resource_id != null
-    error_message = "The credential should be updated in place and the lock back."
+    condition     = endswith(module.interfaces.lock_resource_id, "/lock-ReadOnly")
+    error_message = "The table should have its ReadOnly lock."
   }
 }
 
-run "credential_updated_in_azure" {
+run "change_routes_under_readonly_lock" {
+  # Azure refuses any write of a table under a ReadOnly lock, so the lock is removed around the change of
+  # the routes and created again: drop added back, onprem's prefix changed, storage removed.
+  variables {
+    name      = "rt-mlz-it-${run.setup.suffix}"
+    parent_id = run.setup.resource_group_id
+    location  = run.setup.location
+    routes = {
+      default = { name = "default", address_prefix = "0.0.0.0/0", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "10.100.0.5" }
+      onprem  = { name = "onprem", address_prefix = "172.16.0.0/12", next_hop_type = "VirtualNetworkGateway" }
+      drop    = { name = "drop", address_prefix = "10.200.0.0/16", next_hop_type = "None" }
+      local   = { name = "local", address_prefix = "10.100.8.0/24", next_hop_type = "VnetLocal" }
+      v6      = { name = "v6", address_prefix = "fd00:db8::/48", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "fd00:db8:1::4" }
+      spoke2  = { name = "spoke2", address_prefix = "10.100.9.0/24", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "10.100.0.5" }
+    }
+    tags = { test = "update" }
+    lock = { kind = "ReadOnly" }
+    role_assignments = {
+      reader = { role_definition_id_or_name = "Reader", principal_id = run.setup.object_id }
+    }
+  }
+
+  assert {
+    condition     = output.resource_id == run.create.resource_id && endswith(module.interfaces.lock_resource_id, "/lock-ReadOnly")
+    error_message = "The table should be updated in place and locked ReadOnly again."
+  }
+}
+
+run "read_changed_under_readonly_lock" {
   module {
     source = "./tests/integration/read"
   }
 
   variables {
-    credential_ids = run.update_credential_under_readonly_lock.federated_identity_credential_resource_ids
+    route_table_id = run.change_routes_under_readonly_lock.resource_id
   }
 
   assert {
-    condition     = output.subjects["two"] == "repo:example-org/example-repo:environment:two-updated"
-    error_message = "Azure should report the updated subject."
+    condition = jsonencode(output.routes) == jsonencode({
+      default = { address_prefix = "0.0.0.0/0", next_hop_in_ip_address = "10.100.0.5", next_hop_type = "VirtualAppliance" }
+      drop    = { address_prefix = "10.200.0.0/16", next_hop_in_ip_address = null, next_hop_type = "None" }
+      local   = { address_prefix = "10.100.8.0/24", next_hop_in_ip_address = null, next_hop_type = "VnetLocal" }
+      onprem  = { address_prefix = "172.16.0.0/12", next_hop_in_ip_address = null, next_hop_type = "VirtualNetworkGateway" }
+      spoke2  = { address_prefix = "10.100.9.0/24", next_hop_in_ip_address = "10.100.0.5", next_hop_type = "VirtualAppliance" }
+      v6      = { address_prefix = "fd00:db8::/48", next_hop_in_ip_address = "fd00:db8:1::4", next_hop_type = "VirtualAppliance" }
+    })
+    error_message = "Azure should hold drop again, onprem's new prefix and no storage route: ${jsonencode(output.routes)}."
   }
 }
 
-run "replace_locked_identity" {
-  # A new name replaces the identity. The lock goes first and the pause is replaced with the identity,
-  # so the old identity is deleted only after the lock deletion has propagated.
+run "associated_create" {
+  module {
+    source = "./tests/integration/associated"
+  }
+
   variables {
-    name      = "id-mlz-it-${run.setup.suffix}-renamed"
-    parent_id = run.setup.resource_group_id
-    location  = run.setup.location
-    federated_identity_credentials = {
-      one = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:one" }
-    }
-    lock = { kind = "CanNotDelete" }
+    location          = run.setup.location
+    resource_group_id = run.setup.resource_group_id
+    route_table_name  = "rt-mlz-it-assoc-${run.setup.suffix}"
+    suffix            = run.setup.suffix
+  }
+}
+
+run "read_associated" {
+  module {
+    source = "./tests/integration/read"
+  }
+
+  variables {
+    route_table_id = run.associated_create.resource_id
   }
 
   assert {
-    condition     = output.name == "id-mlz-it-${run.setup.suffix}-renamed" && startswith(module.interfaces.lock_resource_id, "${output.resource_id}/providers/Microsoft.Authorization/locks/")
-    error_message = "The identity should be replaced and locked again."
+    condition     = jsonencode(output.subnet_ids) == jsonencode([lower(run.associated_create.subnet_id)]) && !output.bgp_route_propagation_enabled
+    error_message = "The subnet should use the table, which has BGP propagation off."
+  }
+}
+
+run "associated_rename" {
+  # A rename replaces the table: the new one is created, the subnet moves to it, then the old one, no
+  # longer in use, is deleted; the CanNotDelete lock moves along.
+  module {
+    source = "./tests/integration/associated"
+  }
+
+  variables {
+    location          = run.setup.location
+    resource_group_id = run.setup.resource_group_id
+    route_table_name  = "rt-mlz-it-assoc-${run.setup.suffix}-renamed"
+    suffix            = run.setup.suffix
+  }
+
+  assert {
+    condition     = output.resource_id != run.associated_create.resource_id && output.subnet_id == run.associated_create.subnet_id
+    error_message = "The table should be replaced and the subnet kept."
+  }
+}
+
+run "read_renamed" {
+  module {
+    source = "./tests/integration/read"
+  }
+
+  variables {
+    route_table_id = run.associated_rename.resource_id
+  }
+
+  assert {
+    condition     = jsonencode(output.subnet_ids) == jsonencode([lower(run.associated_rename.subnet_id)]) && jsonencode(keys(output.routes)) == jsonencode(["default"])
+    error_message = "The subnet should use the new table, which has the default route."
   }
 }

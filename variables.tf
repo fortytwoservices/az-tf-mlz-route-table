@@ -1,23 +1,23 @@
 variable "location" {
   type        = string
-  description = "Azure region of the user-assigned identity, for example `norwayeast`."
+  description = "Azure region of the route table, for example `swedencentral`. Only subnets of virtual networks in the same region and subscription can use it (Microsoft Learn)."
   nullable    = false
 }
 
 variable "name" {
   type        = string
-  description = "Name of the user-assigned identity."
+  description = "Name of the route table. A replacement (a change of `name`, `parent_id` or `location`) creates the new table before the old one is deleted, because Azure deletes no route table a subnet uses: subnets in the same configuration move to the new table first. A change of `location` alone therefore also needs a new `name`."
   nullable    = false
 
   validation {
-    condition     = can(regex("^[a-zA-Z0-9][a-zA-Z0-9_-]{2,127}$", var.name))
-    error_message = "`name` must be 3 to 128 characters: letters, digits, hyphens and underscores, starting with a letter or digit."
+    condition     = can(regex("^[a-zA-Z0-9]([a-zA-Z0-9._-]{0,78}[a-zA-Z0-9_])?$", var.name))
+    error_message = "`name` must be 1 to 80 characters: letters, digits, periods, hyphens and underscores, starting with a letter or digit and ending with a letter, digit or underscore."
   }
 }
 
 variable "parent_id" {
   type        = string
-  description = "Resource ID of the resource group the user-assigned identity is created in."
+  description = "Resource ID of the resource group the route table is created in."
   nullable    = false
 
   validation {
@@ -26,103 +26,83 @@ variable "parent_id" {
   }
 }
 
-variable "federated_identity_credentials" {
+variable "bgp_route_propagation_enabled" {
+  type        = bool
+  default     = true
+  description = "(Optional) Whether the subnets using the table also get the routes a virtual network gateway learns over BGP (sent as `disableBgpRoutePropagation`, its opposite). Defaults to `true`, Azure's default, which `GatewaySubnet` must keep. Spokes behind a hub firewall set `false`, so that on-premises prefixes do not bypass the firewall (Microsoft Learn, \"Use Azure Firewall to route a multi-hub and spoke topology\")."
+  nullable    = false
+}
+
+variable "routes" {
   type = map(object({
-    issuer    = string
-    subject   = string
-    audiences = optional(list(string), ["api://AzureADTokenExchange"])
+    name                   = string
+    address_prefix         = string
+    next_hop_type          = string
+    next_hop_in_ip_address = optional(string)
   }))
   default     = {}
   description = <<DESCRIPTION
-Federated identity credentials on the user-assigned identity, keyed by credential name (3 to 120 characters:
-letters, digits, hyphens and underscores, starting with a letter or digit). Azure allows 20 per identity.
+(Optional) The table's routes, keyed by any stable name, in the shape of `Azure/avm-ptn-alz-sub-vending/azure`'s route table `routes` and of the connectivity compositions' `spoke_default_routes`, which can be passed straight in. Every route is written in the table's body: removing one removes it from Azure.
 
-- `issuer` - URL of the external identity provider, for example `https://token.actions.githubusercontent.com`.
-- `subject` - Identifier of the external workload, for example `repo:<owner>/<repo>:environment:<name>`.
-- `audiences` - (Optional) Audiences accepted in the external token. Defaults to `["api://AzureADTokenExchange"]`.
+- `name` - Name of the route, unique in the table: 1 to 80 characters, letters, digits, periods, hyphens and underscores, starting with a letter or digit and ending with a letter, digit or underscore.
+- `address_prefix` - The destination: a CIDR prefix in its canonical form (`10.1.0.0/16`, not `10.1.0.1/16`; IPv6 lower case and compressed, as Terraform's `cidrsubnet` writes it), or a service tag such as `Storage.SwedenCentral` (at most 25 service-tag routes per table).
+- `next_hop_type` - `VirtualAppliance`, `VirtualNetworkGateway` (a VPN gateway only, and not for IPv6 prefixes), `VnetLocal`, `Internet` (Azure accepts only public destinations, `0.0.0.0/0` or a service tag) or `None` (drop).
+- `next_hop_in_ip_address` - (Optional) The appliance's private IP address, for example a firewall's: required for `VirtualAppliance` and refused for every other type. In the prefix's address family, written as Terraform's `cidrhost` writes it.
+
+A table holds at most 400 routes.
 DESCRIPTION
   nullable    = false
 
   validation {
-    condition     = length(var.federated_identity_credentials) <= 20
-    error_message = "A user-assigned identity holds at most 20 federated identity credentials."
+    condition     = length(var.routes) <= 400
+    error_message = "A route table holds at most 400 routes (Microsoft Learn)."
   }
-}
-
-variable "isolation_scope" {
-  type        = string
-  default     = "None"
-  description = "Regional restriction on assigning the identity: `None` (Azure's default) or `Regional`."
-  nullable    = false
-
   validation {
-    condition     = contains(["None", "Regional"], var.isolation_scope)
-    error_message = "`isolation_scope` must be `None` or `Regional`."
+    condition     = alltrue([for route in values(var.routes) : can(regex("^[a-zA-Z0-9]([a-zA-Z0-9._-]{0,78}[a-zA-Z0-9_])?$", route.name))])
+    error_message = "Each `routes[*].name` must be 1 to 80 characters: letters, digits, periods, hyphens and underscores, starting with a letter or digit and ending with a letter, digit or underscore."
   }
-}
-
-variable "lock" {
-  type = object({
-    kind  = string
-    name  = optional(string, null)
-    notes = optional(string, null)
-  })
-  default     = null
-  description = <<DESCRIPTION
-Controls the Resource Lock configuration for this resource. The following properties can be specified:
-
-- `kind` - (Required) The type of lock. Possible values are `\"CanNotDelete\"` and `\"ReadOnly\"`.
-- `name` - (Optional) The name of the lock. If not specified, a name will be generated based on the `kind` value. Changing this forces the creation of a new resource.
-- `notes` - (Optional) Notes about the lock. This value maps to `Microsoft.Authorization/locks.properties.notes`.
-DESCRIPTION
-
   validation {
-    condition     = var.lock != null ? contains(["CanNotDelete", "ReadOnly"], var.lock.kind) : true
-    error_message = "Lock kind must be either `\"CanNotDelete\"` or `\"ReadOnly\"`."
+    condition     = length(distinct([for route in values(var.routes) : lower(route.name)])) == length(var.routes)
+    error_message = "Each `routes[*].name` must be unique in the table (names are not case-sensitive)."
   }
-}
-
-variable "role_assignments" {
-  type = map(object({
-    name                                   = optional(string, null)
-    role_definition_id_or_name             = string
-    principal_id                           = string
-    description                            = optional(string, null)
-    skip_service_principal_aad_check       = optional(bool, false)
-    condition                              = optional(string, null)
-    condition_version                      = optional(string, null)
-    delegated_managed_identity_resource_id = optional(string, null)
-    principal_type                         = optional(string, null)
-  }))
-  default     = {}
-  nullable    = false
-  description = <<DESCRIPTION
-A map of role assignments to create on the user-assigned identity. The map key is deliberately arbitrary to avoid issues where map keys maybe unknown at plan time.
-
-- `name` - (Optional) The name of the role assignment. If not set, a random UUID will be generated. Changing this forces the creation of a new resource.
-- `role_definition_id_or_name` - The ID or name of the role definition to assign to the principal.
-- `principal_id` - The ID of the principal to assign the role to.
-- `description` - (Optional) The description of the role assignment.
-- `skip_service_principal_aad_check` - (Optional) If set to true, skips the Azure Active Directory check for the service principal in the tenant. Defaults to false.
-- `condition` - (Optional) The condition which will be used to scope the role assignment.
-- `condition_version` - (Optional) The version of the condition syntax. Leave as `null` if you are not using a condition, if you are then valid values are '2.0'.
-- `delegated_managed_identity_resource_id` - (Optional) The delegated Azure Resource Id which contains a Managed Identity. Changing this forces a new resource to be created. This field is only used in cross-tenant scenario.
-- `principal_type` - (Optional) The type of the `principal_id`. Possible values are `User`, `Group` and `ServicePrincipal`. It is necessary to explicitly set this attribute when creating role assignments if the principal creating the assignment is constrained by ABAC rules that filters on the PrincipalType attribute.
-
-> Note: only set `skip_service_principal_aad_check` to true if you are assigning a role to a service principal.
-DESCRIPTION
-
+  validation {
+    condition     = alltrue([for route in values(var.routes) : contains(["VirtualAppliance", "VirtualNetworkGateway", "VnetLocal", "Internet", "None"], route.next_hop_type)])
+    error_message = "Each `routes[*].next_hop_type` must be `VirtualAppliance`, `VirtualNetworkGateway`, `VnetLocal`, `Internet` or `None`."
+  }
+  validation {
+    condition     = alltrue([for route in values(var.routes) : (route.next_hop_type == "VirtualAppliance") == (route.next_hop_in_ip_address != null)])
+    error_message = "`routes[*].next_hop_in_ip_address` is required for `VirtualAppliance` and refused for every other next hop type."
+  }
   validation {
     condition = alltrue([
-      for _, v in var.role_assignments :
-      v.delegated_managed_identity_resource_id == null || can(provider::azapi::parse_resource_id("Microsoft.ManagedIdentity/userAssignedIdentities", v.delegated_managed_identity_resource_id))
+      for route in values(var.routes) : route.next_hop_in_ip_address == null ? true :
+      try(cidrhost("${route.next_hop_in_ip_address}/${strcontains(route.next_hop_in_ip_address, ":") ? 128 : 32}", 0) == route.next_hop_in_ip_address, false)
     ])
-    error_message = "Each `role_assignments[*].delegated_managed_identity_resource_id` must be a valid user-assigned managed identity resource ID, or null."
+    error_message = "Each `routes[*].next_hop_in_ip_address` must be an IPv4 or IPv6 address, IPv6 in lower case and compressed (`fd00:db8::4`)."
   }
-}
-
-variable "tags" {
-  type        = map(string)
-  default     = null
-  description = "(Optional) Tags of the resource."
+  # Azure refuses a prefix that is not the network's own address (InvalidCIDRNotation, sandbox 2026-10-29).
+  validation {
+    condition = alltrue([
+      for route in values(var.routes) :
+      try(cidrsubnet(route.address_prefix, 0, 0) == route.address_prefix, false) || can(regex("^[A-Za-z][A-Za-z0-9.-]*$", route.address_prefix))
+    ])
+    error_message = "Each `routes[*].address_prefix` must be a CIDR prefix in its canonical form (`10.1.0.0/16`, not `10.1.0.1/16`; IPv6 in lower case and compressed) or a service tag such as `Storage.SwedenCentral`."
+  }
+  validation {
+    condition     = length([for route in values(var.routes) : route if !strcontains(route.address_prefix, "/")]) <= 25
+    error_message = "A route table holds at most 25 routes with a service tag as `address_prefix` (Microsoft Learn)."
+  }
+  # Both refused by Azure (sandbox, 2026-10-29): ResourceCannotContainAddressPrefixesFromDifferentAddressFamilies
+  # and InvalidNextHopType.
+  validation {
+    condition = alltrue([
+      for route in values(var.routes) : route.next_hop_in_ip_address == null || !strcontains(route.address_prefix, "/") ? true :
+      strcontains(route.address_prefix, ":") == strcontains(route.next_hop_in_ip_address, ":")
+    ])
+    error_message = "A route's `next_hop_in_ip_address` must be in the address family of its `address_prefix` (IPv4 or IPv6)."
+  }
+  validation {
+    condition     = alltrue([for route in values(var.routes) : !(strcontains(route.address_prefix, ":") && route.next_hop_type == "VirtualNetworkGateway")])
+    error_message = "An IPv6 `address_prefix` cannot have the next hop type `VirtualNetworkGateway`."
+  }
 }

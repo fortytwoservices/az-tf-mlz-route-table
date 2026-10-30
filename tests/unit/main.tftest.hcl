@@ -1,14 +1,7 @@
 mock_provider "azapi" {
   mock_resource "azapi_resource" {
     defaults = {
-      id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-test"
-      output = {
-        properties = {
-          clientId    = "22222222-2222-2222-2222-222222222222"
-          principalId = "33333333-3333-3333-3333-333333333333"
-          tenantId    = "44444444-4444-4444-4444-444444444444"
-        }
-      }
+      id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test/providers/Microsoft.Network/routeTables/rt-test"
     }
   }
   mock_data "azapi_resource_list" {
@@ -28,8 +21,8 @@ mock_provider "random" {}
 mock_provider "time" {}
 
 variables {
-  location  = "norwayeast"
-  name      = "id-test"
+  location  = "swedencentral"
+  name      = "rt-test"
   parent_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test"
 }
 
@@ -37,93 +30,83 @@ run "defaults" {
   command = apply
 
   assert {
-    condition     = azapi_resource.this.type == "Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30"
-    error_message = "The identity should use the default resource type."
+    condition     = azapi_resource.this.type == "Microsoft.Network/routeTables@2025-07-01" && azapi_resource.this.name == var.name && azapi_resource.this.parent_id == var.parent_id && azapi_resource.this.location == var.location
+    error_message = "The route table should use the default resource type, name, parent_id and location."
   }
   assert {
-    condition     = azapi_resource.this.name == var.name && azapi_resource.this.parent_id == var.parent_id && azapi_resource.this.location == var.location
-    error_message = "The identity should be created with name, parent_id and location."
+    condition     = jsonencode(azapi_resource.this.body) == jsonencode({ properties = { disableBgpRoutePropagation = false, routes = [] } })
+    error_message = "Without routes, the body should send an empty route list (so removing the last route reaches Azure) and BGP propagation on."
   }
   assert {
-    condition     = azapi_resource.this.body.properties.isolationScope == "None"
-    error_message = "isolationScope should be sent with Azure's default, so that changing it back reaches Azure."
+    condition     = jsonencode(azapi_resource.this.list_unique_id_property) == jsonencode({ "properties.routes" = "name" })
+    error_message = "Routes should be compared by name."
   }
   assert {
-    condition     = azapi_resource.this.retry == null
-    error_message = "retry should be unset by default."
-  }
-  assert {
-    condition     = azapi_resource.this.timeouts == null
-    error_message = "timeouts should be unset by default."
+    condition     = azapi_resource.this.ignore_body_changes == null && azapi_resource.this.retry == null && azapi_resource.this.timeouts == null
+    error_message = "ignore_body_changes, retry and timeouts should be unset by default."
   }
   assert {
     condition     = length(coalesce(azapi_resource.this.tags, {})) == 0 # computed: the mock returns {}
     error_message = "tags should be unset by default."
   }
   assert {
-    condition     = module.interfaces.lock_resource_id == null && length(module.interfaces.role_assignment_resource_ids) + length(module.federated_identity_credential) == 0
-    error_message = "No lock, role assignment or credential should be created by default."
+    condition     = module.interfaces.lock_resource_id == null && length(module.interfaces.role_assignment_resource_ids) == 0 && length(local.lock_dependencies) == 0
+    error_message = "No lock or role assignment should be created by default."
   }
   assert {
     condition     = output.resource_id == azapi_resource.this.id && output.name == var.name
-    error_message = "resource_id and name should come from the identity."
-  }
-  assert {
-    condition     = output.principal_id == "33333333-3333-3333-3333-333333333333" && output.client_id == "22222222-2222-2222-2222-222222222222" && output.tenant_id == "44444444-4444-4444-4444-444444444444"
-    error_message = "principal_id, client_id and tenant_id should come from the identity's exported properties."
-  }
-  assert {
-    condition     = length(output.federated_identity_credential_resource_ids) == 0
-    error_message = "No credential IDs should be output by default."
+    error_message = "resource_id and name should come from the route table."
   }
 }
 
-run "identity_options" {
+run "routes" {
   command = apply
 
+  # Keys differ from the names and from their order: the body follows the names.
   variables {
-    isolation_scope = "Regional"
-    tags            = { environment = "test" }
-  }
-
-  assert {
-    condition     = azapi_resource.this.body.properties.isolationScope == "Regional"
-    error_message = "isolation_scope should map to properties.isolationScope."
-  }
-  assert {
-    condition     = azapi_resource.this.tags == tomap({ environment = "test" })
-    error_message = "tags should be set on the identity."
-  }
-}
-
-run "federated_identity_credentials" {
-  command = apply
-
-  variables {
-    federated_identity_credentials = {
-      github-main = {
-        issuer  = "https://token.actions.githubusercontent.com"
-        subject = "repo:example/example:ref:refs/heads/main"
-      }
-      github-pr = {
-        issuer    = "https://token.actions.githubusercontent.com"
-        subject   = "repo:example/example:pull_request"
-        audiences = ["api://custom"]
-      }
+    bgp_route_propagation_enabled = false
+    routes = {
+      a = { name = "storage", address_prefix = "Storage.SwedenCentral", next_hop_type = "Internet" }
+      b = { name = "default", address_prefix = "0.0.0.0/0", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "10.100.0.4" }
+      c = { name = "onprem", address_prefix = "192.168.0.0/16", next_hop_type = "VirtualNetworkGateway" }
+      d = { name = "drop", address_prefix = "10.200.0.0/16", next_hop_type = "None" }
+      e = { name = "local", address_prefix = "10.100.8.0/24", next_hop_type = "VnetLocal" }
+      f = { name = "v6", address_prefix = "fd00:db8::/48", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "fd00:db8:1::4" }
     }
   }
 
   assert {
-    condition     = toset(keys(module.federated_identity_credential)) == toset(["github-main", "github-pr"])
-    error_message = "One credential module should be created per map entry."
+    condition = jsonencode(azapi_resource.this.body) == jsonencode({
+      properties = {
+        disableBgpRoutePropagation = true
+        routes = [
+          { name = "default", properties = { addressPrefix = "0.0.0.0/0", nextHopType = "VirtualAppliance", nextHopIpAddress = "10.100.0.4" } },
+          { name = "drop", properties = { addressPrefix = "10.200.0.0/16", nextHopType = "None", nextHopIpAddress = null } },
+          { name = "local", properties = { addressPrefix = "10.100.8.0/24", nextHopType = "VnetLocal", nextHopIpAddress = null } },
+          { name = "onprem", properties = { addressPrefix = "192.168.0.0/16", nextHopType = "VirtualNetworkGateway", nextHopIpAddress = null } },
+          { name = "storage", properties = { addressPrefix = "Storage.SwedenCentral", nextHopType = "Internet", nextHopIpAddress = null } },
+          { name = "v6", properties = { addressPrefix = "fd00:db8::/48", nextHopType = "VirtualAppliance", nextHopIpAddress = "fd00:db8:1::4" } },
+        ]
+      }
+    })
+    error_message = "Routes should be sent in name order, every one with nextHopIpAddress (null except for an appliance), and BGP propagation off as disableBgpRoutePropagation = true."
   }
-  assert {
-    condition     = module.federated_identity_credential["github-main"].name == "github-main"
-    error_message = "The map key should be the credential name."
+}
+
+# The connectivity compositions' contract (`spoke_default_routes`), passed straight in.
+run "spoke_default_routes" {
+  command = apply
+
+  variables {
+    bgp_route_propagation_enabled = false
+    routes = {
+      default = { name = "default", address_prefix = "0.0.0.0/0", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "10.100.0.4" }
+    }
   }
+
   assert {
-    condition     = keys(output.federated_identity_credential_resource_ids) == ["github-main", "github-pr"]
-    error_message = "Credential resource IDs should be output by credential name."
+    condition     = jsonencode(azapi_resource.this.body.properties.routes) == jsonencode([{ name = "default", properties = { addressPrefix = "0.0.0.0/0", nextHopType = "VirtualAppliance", nextHopIpAddress = "10.100.0.4" } }])
+    error_message = "A spoke's default route to the firewall should be the table's only route."
   }
 }
 
@@ -131,73 +114,62 @@ run "interfaces" {
   command = apply
 
   variables {
-    federated_identity_credentials = {
-      github-main = {
-        issuer  = "https://token.actions.githubusercontent.com"
-        subject = "repo:example/example:ref:refs/heads/main"
-      }
-    }
     lock = { kind = "CanNotDelete" }
     role_assignments = {
-      by_name = {
-        role_definition_id_or_name = "Reader"
-        principal_id               = "55555555-5555-5555-5555-555555555555"
-      }
-      tenant_level_id = {
-        role_definition_id_or_name       = "/providers/Microsoft.Authorization/roleDefinitions/acdd72a7-3385-48ef-bd42-f606fba81ae7"
-        principal_id                     = "66666666-6666-6666-6666-666666666666"
-        skip_service_principal_aad_check = true
-      }
+      reader = { role_definition_id_or_name = "Reader", principal_id = "55555555-5555-5555-5555-555555555555" }
+    }
+    routes = {
+      default = { name = "default", address_prefix = "0.0.0.0/0", next_hop_type = "Internet" }
     }
   }
 
-  # Their behaviour is tested in az-tf-mlz-interfaces; a test sees only its outputs.
   assert {
-    condition     = module.interfaces.lock_resource_id != null && keys(module.interfaces.role_assignment_resource_ids) == ["by_name", "tenant_level_id"]
+    condition     = module.interfaces.lock_resource_id != null && jsonencode(keys(module.interfaces.role_assignment_resource_ids)) == jsonencode(["reader"])
     error_message = "The lock and role assignments should be created through az-tf-mlz-interfaces."
+  }
+  assert {
+    condition     = length(local.lock_dependencies) == 0
+    error_message = "A CanNotDelete lock lets a table write remove routes, so it should stay in place around route changes."
   }
 }
 
-run "azapi_settings_reach_every_resource" {
+run "readonly_lock" {
   command = apply
 
-  # ignore_body_changes is write-only, so a test cannot read it back, and avm_interface_ignore_body_changes
-  # only checks that the argument uses the variable, not which slot. Setting it here proves the slots are
-  # accepted; which resource reads which slot is left to review. The interface keys of resource_types and
-  # ignore_body_changes, retry and timeouts go to az-tf-mlz-interfaces, whose tests check them.
   variables {
-    lock = { kind = "CanNotDelete" }
-    role_assignments = {
-      reader = {
-        role_definition_id_or_name = "Reader"
-        principal_id               = "55555555-5555-5555-5555-555555555555"
-      }
-    }
-    resource_types = {
-      managedidentity_user_assigned_identities = "Microsoft.ManagedIdentity/userAssignedIdentities@2025-05-31-preview"
-      authorization_locks                      = "Microsoft.Authorization/locks@2016-09-01"
-      authorization_role_assignments           = "Microsoft.Authorization/roleAssignments@2020-04-01-preview"
-    }
-    ignore_body_changes = {
-      managedidentity_user_assigned_identities = ["properties.isolationScope"]
-      authorization_locks                      = ["properties.notes"]
-      authorization_role_assignments           = ["properties.description"]
-    }
-    retry = {
-      error_message_regex = ["AnotherOperationInProgress"]
-    }
-    timeouts = {
-      create = "15m"
+    lock = { kind = "ReadOnly" }
+    routes = {
+      default = { name = "default", address_prefix = "0.0.0.0/0", next_hop_type = "Internet" }
     }
   }
 
   assert {
-    condition     = azapi_resource.this.type == "Microsoft.ManagedIdentity/userAssignedIdentities@2025-05-31-preview"
-    error_message = "The resource_types override should reach the identity."
+    condition     = jsonencode(local.lock_dependencies) == jsonencode({ routes = sha256(jsonencode(azapi_resource.this.body.properties.routes)) })
+    error_message = "With a ReadOnly lock, the routes should be a lock dependency, so the lock is removed around their changes."
+  }
+}
+
+run "azapi_settings" {
+  command = apply
+
+  variables {
+    lock                = { kind = "CanNotDelete" }
+    resource_types      = { network_route_tables = "Microsoft.Network/routeTables@2024-05-01" }
+    ignore_body_changes = { network_route_tables = ["properties.disableBgpRoutePropagation"] }
+    retry               = { error_message_regex = ["AnotherOperationInProgress"] }
+    timeouts            = { create = "30m", update = "30m" }
+    tags                = { environment = "test" }
+  }
+
+  # The interface keys of resource_types and ignore_body_changes, retry and timeouts also go to
+  # az-tf-mlz-interfaces, whose tests check them; ignore_body_changes is write-only.
+  assert {
+    condition     = azapi_resource.this.type == "Microsoft.Network/routeTables@2024-05-01" && azapi_resource.this.tags == tomap({ environment = "test" })
+    error_message = "resource_types and tags should reach the route table."
   }
   assert {
-    condition     = azapi_resource.this.retry.error_message_regex == tolist(["AnotherOperationInProgress"]) && azapi_resource.this.timeouts.create == "15m"
-    error_message = "retry and timeouts should reach the identity."
+    condition     = azapi_resource.this.retry.error_message_regex == tolist(["AnotherOperationInProgress"]) && azapi_resource.this.timeouts.create == "30m" && azapi_resource.this.timeouts.update == "30m"
+    error_message = "retry and timeouts should reach the route table."
   }
 }
 
@@ -205,7 +177,7 @@ run "invalid_name" {
   command = plan
 
   variables {
-    name = "-bad"
+    name = "rt-test-"
   }
 
   expect_failures = [var.name]
@@ -221,76 +193,179 @@ run "invalid_parent_id" {
   expect_failures = [var.parent_id]
 }
 
-run "invalid_isolation_scope" {
+run "invalid_route_name" {
   command = plan
 
   variables {
-    isolation_scope = "Global"
+    routes = {
+      default = { name = "default.", address_prefix = "0.0.0.0/0", next_hop_type = "Internet" }
+    }
   }
 
-  expect_failures = [var.isolation_scope]
+  expect_failures = [var.routes]
 }
 
-run "empty_isolation_scope" {
+run "duplicate_route_names" {
   command = plan
 
   variables {
-    isolation_scope = ""
+    routes = {
+      a = { name = "Default", address_prefix = "0.0.0.0/0", next_hop_type = "Internet" }
+      b = { name = "default", address_prefix = "10.0.0.0/8", next_hop_type = "None" }
+    }
   }
 
-  expect_failures = [var.isolation_scope]
+  expect_failures = [var.routes]
 }
 
-run "null_isolation_scope" {
+# The same name exactly: the validation fails before the routes are keyed by name.
+run "same_route_name_twice" {
   command = plan
 
   variables {
-    isolation_scope = null
+    routes = {
+      a = { name = "default", address_prefix = "0.0.0.0/0", next_hop_type = "Internet" }
+      b = { name = "default", address_prefix = "10.0.0.0/8", next_hop_type = "None" }
+    }
   }
 
-  assert {
-    condition     = azapi_resource.this.body.properties.isolationScope == "None"
-    error_message = "A null isolation_scope should fall back to the default."
+  expect_failures = [var.routes]
+}
+
+run "invalid_next_hop_type" {
+  command = plan
+
+  variables {
+    routes = {
+      default = { name = "default", address_prefix = "0.0.0.0/0", next_hop_type = "VirtualNetworkPeering" }
+    }
   }
+
+  expect_failures = [var.routes]
+}
+
+run "appliance_without_ip_address" {
+  command = plan
+
+  variables {
+    routes = {
+      default = { name = "default", address_prefix = "0.0.0.0/0", next_hop_type = "VirtualAppliance" }
+    }
+  }
+
+  expect_failures = [var.routes]
+}
+
+run "ip_address_without_appliance" {
+  command = plan
+
+  variables {
+    routes = {
+      onprem = { name = "onprem", address_prefix = "192.168.0.0/16", next_hop_type = "VirtualNetworkGateway", next_hop_in_ip_address = "10.100.0.4" }
+    }
+  }
+
+  expect_failures = [var.routes]
+}
+
+run "invalid_ip_address" {
+  command = plan
+
+  variables {
+    routes = {
+      default = { name = "default", address_prefix = "0.0.0.0/0", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "10.100.0.256" }
+    }
+  }
+
+  expect_failures = [var.routes]
+}
+
+run "uncompressed_ipv6_address" {
+  command = plan
+
+  variables {
+    routes = {
+      v6 = { name = "v6", address_prefix = "fd00:db8::/48", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "FD00:DB8:1:0:0:0:0:4" }
+    }
+  }
+
+  expect_failures = [var.routes]
+}
+
+run "host_bits_in_address_prefix" {
+  command = plan
+
+  variables {
+    routes = {
+      spoke = { name = "spoke", address_prefix = "10.100.8.1/24", next_hop_type = "None" }
+    }
+  }
+
+  expect_failures = [var.routes]
+}
+
+run "invalid_address_prefix" {
+  command = plan
+
+  variables {
+    routes = {
+      spoke = { name = "spoke", address_prefix = "10.100.8.0", next_hop_type = "None" }
+    }
+  }
+
+  expect_failures = [var.routes]
+}
+
+run "mixed_address_families" {
+  command = plan
+
+  variables {
+    routes = {
+      default = { name = "default", address_prefix = "0.0.0.0/0", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "fd00:db8:1::4" }
+    }
+  }
+
+  expect_failures = [var.routes]
+}
+
+run "ipv6_to_gateway" {
+  command = plan
+
+  variables {
+    routes = {
+      v6 = { name = "v6", address_prefix = "fd00:db8::/48", next_hop_type = "VirtualNetworkGateway" }
+    }
+  }
+
+  expect_failures = [var.routes]
+}
+
+run "too_many_routes" {
+  command = plan
+
+  variables {
+    routes = { for i in range(401) : "r${i}" => { name = "r${i}", address_prefix = cidrsubnet("10.0.0.0/8", 16, i), next_hop_type = "None" } }
+  }
+
+  expect_failures = [var.routes]
+}
+
+run "too_many_service_tag_routes" {
+  command = plan
+
+  variables {
+    routes = { for i in range(26) : "r${i}" => { name = "r${i}", address_prefix = "Tag${i}", next_hop_type = "Internet" } }
+  }
+
+  expect_failures = [var.routes]
 }
 
 run "invalid_lock_kind" {
   command = plan
 
   variables {
-    lock = { kind = "Delete" }
+    lock = { kind = "DoNotDelete" }
   }
 
   expect_failures = [var.lock]
-}
-
-run "too_many_credentials" {
-  command = plan
-
-  variables {
-    federated_identity_credentials = {
-      for i in range(21) : "credential-${i}" => {
-        issuer  = "https://token.actions.githubusercontent.com"
-        subject = "repo:example/example:environment:env-${i}"
-      }
-    }
-  }
-
-  expect_failures = [var.federated_identity_credentials]
-}
-
-run "invalid_delegated_identity" {
-  command = plan
-
-  variables {
-    role_assignments = {
-      reader = {
-        role_definition_id_or_name             = "Reader"
-        principal_id                           = "55555555-5555-5555-5555-555555555555"
-        delegated_managed_identity_resource_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test"
-      }
-    }
-  }
-
-  expect_failures = [var.role_assignments]
 }
