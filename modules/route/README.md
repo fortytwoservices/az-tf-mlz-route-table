@@ -145,7 +145,7 @@ The following outputs are exported:
 
 ### <a name="output_lock_dependency"></a> [lock\_dependency](#output\_lock\_dependency)
 
-Description: Changes whenever the route is created, replaced or changed. The table passes it in its `lock_dependencies`: Azure applies the table's lock to the route too, so a `CanNotDelete` lock blocks deleting it and a `ReadOnly` lock also blocks changing it.
+Description: Changes whenever the route is created, replaced or written: its ID, API version (`type`, a new one writes the route) and body. The table passes it in its `lock_dependencies`: Azure applies the table's lock to the route too, so a `CanNotDelete` lock blocks deleting it and a `ReadOnly` lock also blocks changing it.
 
 ### <a name="output_name"></a> [name](#output\_name)
 

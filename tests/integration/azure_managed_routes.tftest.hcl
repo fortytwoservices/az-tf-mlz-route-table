@@ -166,12 +166,41 @@ run "read_changed_under_readonly_lock" {
   }
 }
 
+run "route_api_version_under_readonly_lock" {
+  # Only the routes' API version changes: azapi writes each route again, which the ReadOnly lock refuses, so
+  # the routes' lock_dependency changes with the version and the lock is removed around the writes.
+  variables {
+    name                         = "rt-mlz-it-amr-${run.setup.suffix}"
+    parent_id                    = run.setup.resource_group_id
+    location                     = run.setup.location
+    azure_managed_routes_enabled = true
+    routes = {
+      default = { name = "default", address_prefix = "0.0.0.0/0", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "10.100.0.4" }
+      spoke2  = { name = "spoke3", address_prefix = "10.100.10.0/24", next_hop_type = "VirtualAppliance", next_hop_in_ip_address = "10.100.0.4" }
+    }
+    bgp_route_propagation_enabled = false
+    tags                          = { test = "update" }
+    lock                          = { kind = "ReadOnly" }
+    resource_types = {
+      network_route_tables_routes = { network_route_tables_routes = "Microsoft.Network/routeTables/routes@2025-05-01" }
+    }
+  }
+
+  assert {
+    condition     = output.resource_id == run.create.resource_id && endswith(module.interfaces.lock_resource_id, "/lock-ReadOnly")
+    error_message = "The routes should be written with the new API version and the table locked ReadOnly again."
+  }
+}
+
 run "no_change_planned" {
   # azapi sets `output` unknown whenever it plans a change of the body, which fails this assertion: so the
   # outside route, which Azure reports and the configuration does not hold, plans no change.
   command = plan
 
   variables {
+    resource_types = {
+      network_route_tables_routes = { network_route_tables_routes = "Microsoft.Network/routeTables/routes@2025-05-01" }
+    }
     name                         = "rt-mlz-it-amr-${run.setup.suffix}"
     parent_id                    = run.setup.resource_group_id
     location                     = run.setup.location

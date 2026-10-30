@@ -33,8 +33,8 @@ run "defaults" {
     error_message = "ignore_body_changes, retry and timeouts should be unset by default."
   }
   assert {
-    condition     = output.resource_id == azapi_resource.this.id && output.name == var.name && output.lock_dependency == sha256(jsonencode([azapi_resource.this.id, azapi_resource.this.body]))
-    error_message = "resource_id, name and a body-aware lock_dependency should be output."
+    condition     = output.resource_id == azapi_resource.this.id && output.name == var.name && output.lock_dependency == sha256(jsonencode([azapi_resource.this.id, azapi_resource.this.type, azapi_resource.this.body]))
+    error_message = "resource_id, name and a lock_dependency that changes with the ID, the API version and the body should be output."
   }
 }
 
@@ -67,6 +67,10 @@ run "azapi_settings" {
   assert {
     condition     = azapi_resource.this.type == "Microsoft.Network/routeTables/routes@2024-05-01"
     error_message = "resource_types should reach the route."
+  }
+  assert {
+    condition     = output.lock_dependency != run.defaults.lock_dependency
+    error_message = "A new API version alone should change lock_dependency: it writes the route, which a ReadOnly lock refuses."
   }
   assert {
     condition     = azapi_resource.this.retry.error_message_regex == tolist(["AnotherOperationInProgress"]) && azapi_resource.this.timeouts.create == "30m" && azapi_resource.this.timeouts.delete == "30m"
