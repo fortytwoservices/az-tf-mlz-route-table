@@ -41,14 +41,20 @@ module "route_table" {
   tags                          = local.tags
 }
 
+# The instance adds rules of its own to its subnet's NSG too, and Azure refuses any NSG write without them
+# (ConflictWithNetworkIntentPolicy, SQL MI sandbox 2026-10-30). As for the table: an empty rule list, and
+# the live rules sent on every write, from the NSG's creation.
 resource "azapi_resource" "network_security_group" {
   type      = "Microsoft.Network/networkSecurityGroups@2024-05-01"
   name      = "nsg-sqlmi-mlz-${random_string.suffix.result}"
   parent_id = azapi_resource.resource_group.id
   location  = local.location
   body = {
-    properties = {}
+    properties = {
+      securityRules = []
+    }
   }
+  ignore_body_changes = ["properties.securityRules"]
 
   response_export_values = []
   tags                   = local.tags
